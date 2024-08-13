@@ -1,15 +1,15 @@
 #include "application/initialize.h"
 #include "application/control/form/form.h"
-#include "include/application/application.h"
+#include "application/application.h"
 #include "gameInfo.h"
 #include "math/random/random.h"
 #include "soundStream.h"
-#include "include/math/algorithm/iterate2Dto1D.h"
+#include "math/algorithm/iterate2Dto1D.h"
 #include "include/math/swingsynchronizer.h"
 #include "include/math/sound/sound.h"
 
 enum tileType
-{
+{  
     air,
     stone,
     danger
