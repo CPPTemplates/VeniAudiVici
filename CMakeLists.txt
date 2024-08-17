@@ -20,6 +20,7 @@ message("sfml directory: ${SFML_DIR}")
 
 #set(CMAKE_BUILD_TYPE Debug)
 
+
 # set(CMAKE_EXPORT_COMPILE_COMMANDS OFF)
 # Shoutout to CMake guide: https://eliasdaler.github.io/using-cmake/
 
