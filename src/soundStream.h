@@ -1,3 +1,4 @@
+#pragma once
 #include <SFML/Audio.hpp>
 #include "math/random/random.h"
 
@@ -21,14 +22,13 @@ auto currentRandom = getGeneratorBasedOnTime();
 class rawSoundStream : public sf::SoundStream
 {
 public:
-    void SetBufSize(int sz, int channelCount, int sampleRate)
+    virtual void SetBufSize(int sz, int channelCount, int sampleRate)
     {
         samples.resize(sz, 0);
         currentSample = 0;
         initialize(channelCount, sampleRate);
     }
 
-protected:
     virtual bool onGetData(Chunk &data)
     {
         data.samples = &samples[currentSample];

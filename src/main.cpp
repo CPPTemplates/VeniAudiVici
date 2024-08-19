@@ -21,7 +21,7 @@ struct tile
 {
     tileType type = air;
 };
-constexpr size_t size = 0x100;
+constexpr size_t size = 0X400;
 constexpr size_t area = size * size;
 constexpr size_t iterationTimeInMS = 1000;
 constexpr size_t samplesPerIteration = (sampleRate * iterationTimeInMS) / 1000;
@@ -36,13 +36,14 @@ veci2 positions[area]{};
 // const swingSynchronizer dangerNote = swingSynchronizer(sampleRate / a5Hz, soundMin, soundMax);
 
 fp lowestNote = log2(minObservableHZ * 2);
-fp highestNote = log2(maxObservableHZ / 3);
+fp highestNote = log2(maxObservableHZ / 8);
 
-class audializer : public rawSoundStream
+class audializer final : public rawSoundStream
 {
 public:
     sf::Mutex m;
-    texture audializationBuffer;
+    doubleBuffer audializationBuffer;
+    std::vector<colorf> colorValues = std::vector<colorf>(audioBufSize);
     /// @brief the audializer will loop over this picture and convert it to sound!
     /// @param imageToAudialize will make a copy!
     audializer() : audializationBuffer(veci2(size))
@@ -59,27 +60,33 @@ public:
         drawRect.size *= scalar;
 
         // m.lock();
-        audializationBuffer.fill(color());
+        audializationBuffer[doubleBuffer::write]->fill(color());
 
-        fillTransformedTexture(drawRect, imageToAudialize, audializationBuffer);
+        fillTransformedTexture(drawRect, imageToAudialize, *audializationBuffer[doubleBuffer::write]);
+        audializationBuffer.swap();
         // samplesPlayed = 0;
         // m.unlock();
     }
     void setImagePart(const texture &imageToAudialize, rectangle2 rect)
     {
-        audializationBuffer.fill(color());
-        const auto transform = mat3x3::fromRectToRect(rect, (rectangle2)audializationBuffer.getClientRect());
+        audializationBuffer[doubleBuffer::write]->fill(color());
+        const auto transform = mat3x3::fromRectToRect(rect, (rectangle2)audializationBuffer[doubleBuffer::write]->getClientRect());
         if (rectangle2(imageToAudialize.getClientRect()).cropClientRect(rect))
         {
-            fillTransformedBrushRectangle(rect, transform, imageToAudialize, audializationBuffer);
+            fillTransformedBrushRectangle(rect, transform, imageToAudialize, *audializationBuffer[doubleBuffer::write]);
         }
+        audializationBuffer.swap();
     }
 
-    size_t iterationIndex = 0;
+    constexpr fp getCustomWaveAmpAt(const waveShaper &s, cfp &timePoint)
+    {
+        return math::mapValue(abs(sin(((timePoint - s.offset) / s.waveLength) * (math::PI))), (fp)0, (fp)1, s.minAmp, s.maxAmp);
+    }
+
+    int iterationIndex = 0;
     // amount of samples this audializer played since its construction
     int samplesPlayed = 0;
     waveShaper brightnessWaves = waveShaper(0, soundMin, soundMax);
-    waveShaper hueWaves = waveShaper(0, soundMin, soundMax);
     virtual bool onGetData(Chunk &data)
     {
         if (rawSoundStream::onGetData(data))
@@ -87,13 +94,32 @@ public:
             std::fill(samples.begin(), samples.end(), 0);
             m.lock();
 
-            for (int bufferIndex = 0; bufferIndex < audioBufSize; iterationIndex++, samplesPlayed++)
+            for (int bufferIndex = 0; bufferIndex < audioBufSize; samplesPlayed++)
             {
-                iterationIndex = (samplesPlayed * (size_t)area) / samplesPerIteration;
-                iterationIndex %= area;
-                cveci2 &imagePos = positions[iterationIndex];
-                const color currentColor = audializationBuffer.getValueUnsafe(imagePos);
-                const colorf hsvColor = rgb2hsv(currentColor);
+                // not % area!
+                cfp &exactIterationIndex = (samplesPlayed * (fp)area) / (fp)samplesPerIteration;
+
+                colorf colorsToInterpolate[2]{};
+                // not % area!
+                cint &iterationIndex0 = (int)floor(exactIterationIndex);
+                iterationIndex = iterationIndex0 % area;
+
+                for (int i = 0; i < 2; i++)
+                {
+                    cint &currentIterationIndex = (iterationIndex + i) % area;
+                    cveci2 &imagePos = positions[currentIterationIndex];
+                    const color currentColor = audializationBuffer[doubleBuffer::read]->getValueUnsafe(imagePos);
+                    colorsToInterpolate[i] = rgb2hsv(currentColor);
+                    // if (colorsToInterpolate[i].v() < 0.3)
+                    //{
+                    //     colorsToInterpolate[i].h() = 1;
+                    // }
+                }
+
+                cfp &weight = exactIterationIndex - iterationIndex0;
+                // the interpolated color
+                colorf hsvColor = lerpColor(colorsToInterpolate[0], colorsToInterpolate[1], weight);
+
                 short amp;
                 // higher pitch = lighter color
 
@@ -110,21 +136,30 @@ public:
                 // https://physics.stackexchange.com/questions/194485/which-is-has-the-highest-greatest-sound-intensity-sine-square-or-sawtooth-w
                 // multiplying by values, because sines and squares are louder
 
-                //add sawtooth wave for the hue. the sawtooth wave is smaller. it will shift, depending on the hue rotation.
+                // add sawtooth wave for the hue. the sawtooth wave is smaller. it will shift, depending on the hue rotation.
 
-                fp sawToothAmp = brightnessWaves.getSawtoothAmpAt((fp)samplesPlayed); // * 0.1;
-                fp squareAmp = brightnessWaves.getSquareAmpAt((fp)samplesPlayed);     // * 0.5;
+                fp sawToothAmp = brightnessWaves.getSawtoothAmpAt((fp)samplesPlayed);    // * 0.1;
+                fp squareAmp = getCustomWaveAmpAt(brightnessWaves, ((fp)samplesPlayed)); // * 0.5;
                 //  hue shifts from sine to sawtooth
                 //  180 degrees: square <-> sawtooth (more sawtooth the farther)
-                fp hueAmp = math::lerp(sawToothAmp, squareAmp, math::absolute(180 - hsvColor.h()) / 180 - 1);
+                fp hueAmp = math::lerp(sawToothAmp, squareAmp, math::absolute(180 - hsvColor.h()) / 180);
 
                 // saturation
 
                 // lesser vibrant = more sine
-                amp = (short)(math::lerp(sineAmp, hueAmp, hsvColor.s())
-                              // better not do much with volume, volume is extremely relative
-                              // alpha
-                              * hsvColor.a());
+                cfp &floatAmp = (math::lerp(sineAmp, hueAmp, hsvColor.s())
+                                 // better not do much with volume, volume is extremely relative
+                                 // alpha
+                                 * hsvColor.a());
+
+                if (floatAmp < soundMin || floatAmp > soundMax)
+                    throw "";
+                amp = (short)floatAmp;
+
+                // if (bufferIndex > 0 && amp > samples[bufferIndex - 1] + 0x1000)
+                //{
+                //     amp++;
+                // }
 
                 // if (currentTile.type == stone)
                 //{
@@ -136,8 +171,11 @@ public:
                 // }
                 // else
                 //     amp = rand(currentRandom, soundMin, soundMax);
-                samples[bufferIndex++] = amp;
-                samples[bufferIndex++] = amp;
+                for (int channelIndex = 0; channelIndex < channelCount; channelIndex++)
+                {
+                    colorValues[bufferIndex] = hsvColor;
+                    samples[bufferIndex++] = amp;
+                }
             }
             m.unlock();
             return true;
@@ -151,12 +189,15 @@ struct gameForm : public form
 {
     std::vector<texture> textures = std::vector<texture>();
     audializer stream = audializer();
-    size_t renderedPosIndex = 0;
+    int renderedPosIndex = 0;
     // the image of the list that is being audialized
     size_t imageIndex = 0;
-    veci2 eyePos = veci2(size / 2);
-    //the amount of pixels the eye sees.
+    vec2 eyePos = vec2(size / 2);
+    vec2 newEyePos = eyePos;
+    // the amount of pixels the eye sees.
     fp eyeFocusSize = 0x100;
+    bool changed = false;
+    veci2 oldMousePos = veci2();
     gameForm()
     {
         stdFileSystem::directory_iterator it("data/images");
@@ -183,7 +224,7 @@ struct gameForm : public form
     }
     void updateStream()
     {
-        stream.setImagePart(textures[imageIndex], crectangle2(eyePos - (eyeFocusSize / 2), vec2(eyeFocusSize)));
+        stream.setImagePart(textures[imageIndex], crectangle2(veci2(eyePos) - (eyeFocusSize / 2), vec2(eyeFocusSize)));
     }
     virtual void keyDown(cvk &keyCode) override
     {
@@ -193,33 +234,56 @@ struct gameForm : public form
             if (imageIndex == std::wstring::npos)
                 imageIndex = textures.size() - 1;
         }
-        else
+        else if (keyCode == sf::Keyboard::Right)
         {
             imageIndex++;
             imageIndex = math::mod(imageIndex, textures.size());
         }
-        updateStream();
+        changed = true;
     }
-    virtual void mouseMove(cveci2 &position, cmb &button) override
-    {
-        eyePos = position;
-        updateStream();
-    }
+    // virtual void mouseMove(cveci2 &position, cmb &button) override
+    //{
+    //     veci2 difference = position - oldMousePos;
+    //     oldMousePos = position;
+    //     if (difference.lengthSquared() < 0x10000)
+    //     {
+    //         eyePos += veci2(difference * math::maximum(eyeFocusSize / size, (fp)1));
+    //         changed = true;
+    //     }
+    //     sf::Mouse::setPosition(sf::Vector2i(0x100, 0x100));
+    // }
     virtual void mouseDown(cveci2 &position, cmb &button) override
     {
-        
     }
     virtual void scroll(cveci2 &position, cint &scrollDelta) override
     {
         eyeFocusSize *= pow(2, scrollDelta / -10.0);
-        updateStream();
+        changed = true;
     }
     virtual void render(cveci2 &position, const texture &renderTarget) override
     {
+        cint &renderSize = renderTarget.size.minimum();
+        if (focused)
+        {
+            const auto &currentMousePos = sf::Mouse::getPosition();
+            const auto &centerPos = sf::Vector2i(0x100, 0x100);
+            const auto &difference = currentMousePos - centerPos;
+            if (difference.x || difference.y)
+            {
+                eyePos += veci2(difference.x, -difference.y) * (eyeFocusSize / renderSize);
+                changed = true;
+                sf::Mouse::setPosition(centerPos);
+            }
+        }
+        if (changed)
+        {
+            updateStream();
+            changed = false;
+        }
         renderTarget.fill(colorPalette::black);
         // fp hue = 0;
         cfp &step = 360.0 / area;
-        copyArray(stream.audializationBuffer, renderTarget);
+        fillTransformedTexture(crectangle2(cvec2(renderSize)), *stream.audializationBuffer[doubleBuffer::read], renderTarget);
         bool renderTillEnd = stream.iterationIndex < renderedPosIndex;
         for (; renderedPosIndex < stream.iterationIndex || renderTillEnd; renderedPosIndex++)
         {
@@ -232,6 +296,32 @@ struct gameForm : public form
             const color &val = (color)hsv2rgb(colorf(step * (fp)renderedPosIndex, 1, 1));
             renderTarget.setValue(pos, val);
         }
+        // render sound wave
+        veci2 offsetPos = veci2(renderSize, 0);
+        const int endOffset = math::minimum((int)stream.samples.size(), (int)renderTarget.size.x - offsetPos.x);
+        veci2 p0 = offsetPos;
+        color c0 = colorPalette::transparent;
+        cint& soundWaveSize = renderSize / 0x4;
+        for (int sampleOffset = 0; sampleOffset < endOffset; sampleOffset++)
+        {
+            const color &c = color(hsv2rgb(stream.colorValues[sampleOffset]));
+            cveci2 &p1 = offsetPos + veci2(sampleOffset, ((stream.samples[sampleOffset] - (int)soundMin) * (int)soundWaveSize) / ((int)soundMax - soundMin));
+            if (c == c0)
+            {
+                fillLine(renderTarget, p0,
+                         p1,
+                         solidColorBrush(c));
+            }
+            else
+            {
+                renderTarget.setValue(p1, c);
+            }
+            renderTarget.setValue(veci2(p1.x, p1.y - 1), colorPalette::white);
+
+            p0 = p1;
+            c0 = c;
+        }
+
         // for (const veci2 &pos : positions)
         //{
         //     const color &val = (tiles.getValue(pos).type == air) ? (color)hsv2rgb(colorf(hue += step, 1, 1)) : colorPalette::white;

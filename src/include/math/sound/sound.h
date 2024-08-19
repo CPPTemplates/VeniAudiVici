@@ -9,6 +9,8 @@ constexpr fp maxObservableHZ = 16000;
 //the amount of hz of the note A 4 on a regular piano
 constexpr fp a4Hz = 440;
 
+constexpr int sampleRateCD = 14400;
+
 //returns 1 if the relative note is 0, 2 if it is 12 and so on
 fp getNotePitch(cfp& relativeNote);
 constexpr fp getHearingRange2D(cfp& visibleScreenRange){
